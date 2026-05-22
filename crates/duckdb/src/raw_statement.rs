@@ -346,6 +346,84 @@ impl RawStatement {
         }
     }
 
+    pub fn streaming_schema(&mut self) -> Result<SchemaRef> {
+        let Some(result) = self.duckdb_result.as_mut() else {
+            return Err(Error::DuckDBFailure(
+                ffi::Error::new(ffi::DuckDBError),
+                Some("streaming result is not initialized".to_string()),
+            ));
+        };
+
+        unsafe {
+            let column_count = ffi::duckdb_column_count(result as *mut _) as usize;
+            let mut types = Vec::with_capacity(column_count);
+            let mut names = Vec::with_capacity(column_count);
+
+            for column_index in 0..column_count {
+                let logical_type = ffi::duckdb_column_logical_type(result as *mut _, column_index as u64);
+                if logical_type.is_null() {
+                    for mut logical_type in types {
+                        ffi::duckdb_destroy_logical_type(&mut logical_type);
+                    }
+                    return Err(Error::DuckDBFailure(
+                        ffi::Error::new(ffi::DuckDBError),
+                        Some(format!(
+                            "failed to fetch logical type for streaming column {column_index}"
+                        )),
+                    ));
+                }
+                types.push(logical_type);
+                names.push(ffi::duckdb_column_name(result as *mut _, column_index as u64));
+            }
+
+            let mut arrow_options = ffi::duckdb_result_get_arrow_options(result as *mut _);
+            if arrow_options.is_null() {
+                for mut logical_type in types {
+                    ffi::duckdb_destroy_logical_type(&mut logical_type);
+                }
+                return Err(Error::DuckDBFailure(
+                    ffi::Error::new(ffi::DuckDBError),
+                    Some("failed to fetch Arrow options for streaming result".to_string()),
+                ));
+            }
+
+            let mut c_schema = FFI_ArrowSchema::empty();
+            let mut error_data = ffi::duckdb_to_arrow_schema(
+                arrow_options,
+                types.as_mut_ptr(),
+                names.as_mut_ptr(),
+                column_count as u64,
+                &mut c_schema as *mut _ as *mut ffi::ArrowSchema,
+            );
+
+            ffi::duckdb_destroy_arrow_options(&mut arrow_options);
+            for mut logical_type in types {
+                ffi::duckdb_destroy_logical_type(&mut logical_type);
+            }
+
+            let has_error = !error_data.is_null() && ffi::duckdb_error_data_has_error(error_data);
+            let error_message = if has_error {
+                let message_ptr = ffi::duckdb_error_data_message(error_data);
+                if message_ptr.is_null() {
+                    Some("failed to convert DuckDB schema to Arrow schema".to_string())
+                } else {
+                    Some(CStr::from_ptr(message_ptr).to_string_lossy().to_string())
+                }
+            } else {
+                None
+            };
+            if !error_data.is_null() {
+                ffi::duckdb_destroy_error_data(&mut error_data);
+            }
+            if let Some(message) = error_message {
+                return Err(Error::DuckDBFailure(ffi::Error::new(ffi::DuckDBError), Some(message)));
+            }
+
+            let schema = Schema::try_from(&c_schema).map_err(|err| Error::ToSqlConversionFailure(Box::new(err)))?;
+            Ok(Arc::new(schema))
+        }
+    }
+
     #[inline]
     pub fn reset_result(&mut self) {
         self.schema = None;

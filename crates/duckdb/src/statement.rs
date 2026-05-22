@@ -141,6 +141,16 @@ impl Statement<'_> {
         Ok(ArrowStream::new(self, schema))
     }
 
+    /// Execute the prepared statement and infer the Arrow schema from DuckDB's
+    /// streaming result metadata.
+    #[inline]
+    pub fn stream_arrow_inferred<P: Params>(&mut self, params: P) -> Result<ArrowStream<'_>> {
+        params.__bind_in(self)?;
+        self.stmt.execute_streaming()?;
+        let schema = self.stmt.streaming_schema()?;
+        Ok(ArrowStream::new(self, schema))
+    }
+
     /// Execute the prepared statement, returning a handle to the resulting
     /// vector of polars DataFrame.
     ///
