@@ -387,6 +387,13 @@ mod build_linked {
         if let Ok(dir) = env::var("CARGO_TARGET_DIR") {
             return Ok(PathBuf::from(dir).join("duckdb-download"));
         }
+        if let Some(deps_dir) = profile_deps_dir(out_dir) {
+            if let Some(profile_dir) = deps_dir.parent() {
+                if let Some(target_root) = profile_dir.parent() {
+                    return Ok(target_root.join("duckdb-download"));
+                }
+            }
+        }
         let target_root = Path::new(out_dir)
             .ancestors()
             .find(|ancestor| {
