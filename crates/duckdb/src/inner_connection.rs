@@ -60,6 +60,7 @@ pub struct InnerConnection {
     database: Arc<Mutex<DatabaseHandle>>,
     pub con: ffi::duckdb_connection,
     interrupt: Arc<InterruptHandle>,
+    progress: QueryProgressHandle,
 }
 
 impl InnerConnection {
@@ -77,11 +78,13 @@ impl InnerConnection {
                 ));
             }
             let interrupt = Arc::new(InterruptHandle::new(con));
+            let progress = QueryProgressHandle::new(con);
 
             Ok(Self {
                 database,
                 con,
                 interrupt,
+                progress,
             })
         }
     }
@@ -108,10 +111,11 @@ impl InnerConnection {
         if self.con.is_null() {
             return Ok(());
         }
+        self.progress.clear();
+        self.interrupt.clear();
         unsafe {
             ffi::duckdb_disconnect(&mut self.con);
             self.con = ptr::null_mut();
-            self.interrupt.clear();
         }
         Ok(())
     }
@@ -253,6 +257,10 @@ impl InnerConnection {
         self.interrupt.clone()
     }
 
+    pub fn get_query_progress_handle(&self) -> QueryProgressHandle {
+        self.progress.clone()
+    }
+
     #[inline]
     pub fn is_autocommit(&self) -> bool {
         true
@@ -312,5 +320,51 @@ impl InterruptHandle {
                 ffi::duckdb_interrupt(*db_handle);
             }
         }
+    }
+}
+
+/// A snapshot of the progress of a query executing on a connection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QueryProgress {
+    /// Percentage reported by DuckDB. A negative value means unknown.
+    pub percentage: f64,
+    /// Number of rows processed by the query.
+    pub rows_processed: u64,
+    /// Estimated total number of rows to process.
+    pub total_rows_to_process: u64,
+}
+
+/// A cloneable handle for observing query progress from another thread.
+#[derive(Clone)]
+pub struct QueryProgressHandle {
+    conn: Arc<Mutex<ffi::duckdb_connection>>,
+}
+
+unsafe impl Send for QueryProgressHandle {}
+unsafe impl Sync for QueryProgressHandle {}
+
+impl QueryProgressHandle {
+    fn new(conn: ffi::duckdb_connection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }
+    }
+
+    fn clear(&self) {
+        *self.conn.lock().unwrap() = ptr::null_mut();
+    }
+
+    /// Returns a snapshot, or `None` after the connection is closed.
+    pub fn query_progress(&self) -> Option<QueryProgress> {
+        let conn = self.conn.lock().unwrap();
+        if conn.is_null() {
+            return None;
+        }
+        let progress = unsafe { ffi::duckdb_query_progress(*conn) };
+        Some(QueryProgress {
+            percentage: progress.percentage,
+            rows_processed: progress.rows_processed,
+            total_rows_to_process: progress.total_rows_to_process,
+        })
     }
 }

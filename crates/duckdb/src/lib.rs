@@ -79,7 +79,7 @@ pub use crate::{
     config::{AccessMode, Config, DefaultNullOrder, DefaultOrder},
     error::Error,
     ffi::ErrorCode,
-    inner_connection::InterruptHandle,
+    inner_connection::{InterruptHandle, QueryProgress, QueryProgressHandle},
     params::{Params, ParamsFromIter, params_from_iter},
     row::{AndThenRows, Map, MappedRows, Row, RowIndex, Rows},
     statement::Statement,
@@ -672,6 +672,12 @@ impl Connection {
         self.db.borrow().get_interrupt_handle()
     }
 
+    /// Returns a cloneable handle for observing progress of queries executed
+    /// by this connection from another thread.
+    pub fn query_progress_handle(&self) -> QueryProgressHandle {
+        self.db.borrow().get_query_progress_handle()
+    }
+
     /// Close the DuckDB connection.
     ///
     /// This is functionally equivalent to the `Drop` implementation for
@@ -737,6 +743,29 @@ mod test {
         }
 
         assert_send::<Connection>();
+    }
+
+    #[test]
+    fn query_progress_handle_is_send_sync_and_cloneable() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<QueryProgressHandle>();
+
+        let db = checked_memory_handle();
+        let handle = db.query_progress_handle();
+        let cloned = handle.clone();
+        assert!(handle.query_progress().is_some());
+        assert!(cloned.query_progress().is_some());
+    }
+
+    #[test]
+    fn query_progress_handle_is_disarmed_when_connection_closes() {
+        let db = checked_memory_handle();
+        let handle = db.query_progress_handle();
+        assert!(handle.query_progress().is_some());
+
+        db.close().unwrap();
+
+        assert_eq!(handle.query_progress(), None);
     }
 
     pub fn checked_memory_handle() -> Connection {
