@@ -171,6 +171,34 @@ mod test {
     }
 
     #[test]
+    fn test_query_appender_abort_discards_buffered_input() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE transformed(id INTEGER)")?;
+        db.execute_batch("BEGIN TRANSACTION")?;
+        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
+        let first_batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef],
+        )
+        .unwrap();
+        let mut app =
+            db.query_appender_arrow("INSERT INTO transformed SELECT id FROM incoming", &schema, "incoming")?;
+        app.append_record_batch(first_batch)?;
+        app.flush()?;
+        let later_batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(Int32Array::from(vec![4, 5, 6])) as ArrayRef],
+        )
+        .unwrap();
+        app.append_record_batch(later_batch)?;
+        app.abort()?;
+        db.execute_batch("ROLLBACK")?;
+        let count: usize = db.query_row("SELECT count(*) FROM transformed", [], |row| row.get(0))?;
+        assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[test]
     fn test_append_record_batch_uuid_extension() -> Result<()> {
         let db = Connection::open_in_memory()?;
         db.execute_batch("CREATE TABLE foo(pos INTEGER, id UUID)")?;

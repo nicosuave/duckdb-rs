@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{Appender, Config, Connection, QueryAppender, Result, ffi};
+use super::{Appender, Config, Connection, DmlStatementType, QueryAppender, Result, ffi};
 use crate::{
     core::LogicalTypeHandle,
     error::{
@@ -155,6 +155,34 @@ impl InnerConnection {
         Ok(Statement::new(conn, unsafe { RawStatement::new(final_stmt) }))
     }
 
+    pub fn validate_single_dml_statement(&mut self, sql: &str) -> Result<DmlStatementType> {
+        let c_str = CString::new(sql)?;
+        let mut extracted = ptr::null_mut();
+        let num_stmts = unsafe { ffi::duckdb_extract_statements(self.con, c_str.as_ptr(), &mut extracted) };
+        result_from_duckdb_extract(num_stmts, extracted)?;
+        let _guard = ExtractedStatementsGuard(extracted);
+        if num_stmts != 1 {
+            return Err(duckdb_failure_from_message(format!(
+                "expected exactly one statement, found {num_stmts}"
+            )));
+        }
+
+        // Preparing the extracted statement binds and classifies it, but does
+        // not execute it. In particular, no intermediate statement is run.
+        let mut statement = self.prepare_extracted_statement(extracted, 0)?;
+        let statement_type = unsafe { ffi::duckdb_prepared_statement_type(statement) };
+        unsafe { ffi::duckdb_destroy_prepare(&mut statement) };
+        match statement_type {
+            ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_INSERT => Ok(DmlStatementType::Insert),
+            ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_UPDATE => Ok(DmlStatementType::Update),
+            ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_DELETE => Ok(DmlStatementType::Delete),
+            ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_MERGE_INTO => Ok(DmlStatementType::MergeInto),
+            _ => Err(duckdb_failure_from_message(format!(
+                "statement type {statement_type} is not INSERT, UPDATE, DELETE, or MERGE INTO"
+            ))),
+        }
+    }
+
     fn prepare_extracted_statement(
         &self,
         extracted: ffi::duckdb_extracted_statements,
@@ -272,7 +300,18 @@ impl InnerConnection {
             )));
         }
 
-        let c_query = CString::new(query)?;
+        let c_extract_query = CString::new(query)?;
+        let mut extracted = ptr::null_mut();
+        let num_stmts = unsafe { ffi::duckdb_extract_statements(self.con, c_extract_query.as_ptr(), &mut extracted) };
+        result_from_duckdb_extract(num_stmts, extracted)?;
+        let _guard = ExtractedStatementsGuard(extracted);
+        if num_stmts != 1 {
+            return Err(duckdb_failure_from_message(format!(
+                "query appender requires exactly one statement, found {num_stmts}"
+            )));
+        }
+
+        let c_query = c_extract_query;
         let c_relation_name = CString::new(relation_name)?;
         let c_column_names = column_names
             .iter()

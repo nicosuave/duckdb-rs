@@ -86,6 +86,19 @@ pub use crate::{
     transaction::{DropBehavior, Transaction},
     types::ToSql,
 };
+
+/// A DuckDB data-modification statement accepted by the query appender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmlStatementType {
+    /// `INSERT` statement.
+    Insert,
+    /// `UPDATE` statement.
+    Update,
+    /// `DELETE` statement.
+    Delete,
+    /// `MERGE INTO` statement.
+    MergeInto,
+}
 #[cfg(feature = "polars")]
 pub use polars_dataframe::Polars;
 
@@ -147,6 +160,59 @@ pub mod vscalar;
 
 #[cfg(test)]
 mod test_all_types;
+
+#[cfg(test)]
+mod query_appender_validation_tests {
+    use super::{Connection, DmlStatementType};
+
+    #[test]
+    fn validates_each_supported_dml_type_without_execution() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE target(id INTEGER PRIMARY KEY, value INTEGER)")
+            .unwrap();
+        assert_eq!(
+            conn.validate_single_dml_statement("INSERT INTO target VALUES (1, 2)")
+                .unwrap(),
+            DmlStatementType::Insert
+        );
+        assert_eq!(
+            conn.validate_single_dml_statement("UPDATE target SET value = 3 WHERE id = 1")
+                .unwrap(),
+            DmlStatementType::Update
+        );
+        assert_eq!(
+            conn.validate_single_dml_statement("DELETE FROM target WHERE id = 1")
+                .unwrap(),
+            DmlStatementType::Delete
+        );
+        assert_eq!(
+            conn.validate_single_dml_statement(
+                "MERGE INTO target USING (VALUES (1, 4)) source(id, value) ON target.id = source.id WHEN MATCHED THEN UPDATE SET value = source.value WHEN NOT MATCHED THEN INSERT VALUES (source.id, source.value)"
+            )
+            .unwrap(),
+            DmlStatementType::MergeInto
+        );
+        let count: usize = conn
+            .query_row("SELECT count(*) FROM target", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "validation must not execute DML");
+    }
+
+    #[test]
+    fn rejects_select_and_multiple_statements_without_execution() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE target(id INTEGER)").unwrap();
+        assert!(conn.validate_single_dml_statement("SELECT 1").is_err());
+        assert!(
+            conn.validate_single_dml_statement("INSERT INTO target VALUES (1); DELETE FROM target")
+                .is_err()
+        );
+        let count: usize = conn
+            .query_row("SELECT count(*) FROM target", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "no statement in a rejected payload may execute");
+    }
+}
 
 // Number of cached prepared statements we'll hold on to.
 const STATEMENT_CACHE_DEFAULT_CAPACITY: usize = 16;
@@ -639,6 +705,15 @@ impl Connection {
         self.db
             .borrow_mut()
             .query_appender(self, query, types, relation_name, column_names)
+    }
+
+    /// Parse, bind, and classify exactly one data-modification statement
+    /// without executing it.
+    ///
+    /// Unlike [`prepare`](Connection::prepare), this rejects multiple
+    /// statements and never executes intermediate statements.
+    pub fn validate_single_dml_statement(&self, sql: &str) -> Result<DmlStatementType> {
+        self.db.borrow_mut().validate_single_dml_statement(sql)
     }
 
     /// Create an Appender that only provides values for specific columns, with schema.

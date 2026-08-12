@@ -95,6 +95,15 @@ impl QueryAppender<'_> {
     pub fn flush(&mut self) -> Result<()> {
         self.inner.flush()
     }
+
+    /// Discard buffered input and destroy the appender without executing it.
+    ///
+    /// This should be called on stream cancellation or decoder failure so the
+    /// appender's `Drop` cannot implicitly flush the current buffer.
+    pub fn abort(mut self) -> Result<()> {
+        let rc = unsafe { ffi::duckdb_appender_clear(self.inner.app) };
+        result_from_duckdb_appender(rc, &mut self.inner.app)
+    }
 }
 
 impl<'conn> QueryAppender<'conn> {
