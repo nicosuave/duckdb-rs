@@ -1,10 +1,11 @@
-use super::{Appender, Result, ffi};
+use super::{Appender, QueryAppender, Result, ffi};
 use crate::{
     Error,
     arrow_interop::{record_batch_to_duckdb_data_chunk, to_duckdb_logical_type_for_field},
     core::DataChunkHandle,
     error::{arrow_conversion_failure, result_from_duckdb_appender},
 };
+use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use ffi::{duckdb_append_data_chunk, duckdb_vector_size};
 
@@ -62,6 +63,35 @@ impl Appender<'_> {
     }
 }
 
+impl QueryAppender<'_> {
+    /// Append one Arrow record batch to the query's input relation.
+    #[inline]
+    pub fn append_record_batch(&mut self, record_batch: RecordBatch) -> Result<()> {
+        self.inner.append_record_batch(record_batch)
+    }
+}
+
+impl crate::Connection {
+    /// Create a query appender whose named input relation has an Arrow schema.
+    pub fn query_appender_arrow(&self, query: &str, schema: &Schema, relation_name: &str) -> Result<QueryAppender<'_>> {
+        let logical_types = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                to_duckdb_logical_type_for_field(field).map_err(|err| {
+                    Error::ArrowTypeToDuckdbType(format!("{}: {err}", field.name()), field.data_type().clone())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let column_names = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>();
+        self.query_appender(query, &logical_types, relation_name, &column_names)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{
@@ -104,6 +134,39 @@ mod test {
         let mut stmt = db.prepare("SELECT id, area, name FROM foo")?;
         let rbs: Vec<RecordBatch> = stmt.query_arrow([])?.collect();
         assert_eq!(rbs.iter().map(|op| op.num_rows()).sum::<usize>(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_appender_record_batch() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE transformed(id INTEGER, label VARCHAR)")?;
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("label", DataType::Utf8, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["one", "two", "three"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        {
+            let mut app = db.query_appender_arrow(
+                "INSERT INTO transformed SELECT id * 10, upper(label) FROM incoming WHERE id > 1",
+                &schema,
+                "incoming",
+            )?;
+            app.append_record_batch(batch)?;
+            app.flush()?;
+        }
+        let rows = db
+            .prepare("SELECT id, label FROM transformed ORDER BY id")?
+            .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(rows, vec![(20, "TWO".to_owned()), (30, "THREE".to_owned())]);
         Ok(())
     }
 

@@ -6,11 +6,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{Appender, Config, Connection, Result, ffi};
+use super::{Appender, Config, Connection, QueryAppender, Result, ffi};
 use crate::{
+    core::LogicalTypeHandle,
     error::{
-        Error, result_from_duckdb_appender, result_from_duckdb_extract, result_from_duckdb_prepare,
-        result_from_duckdb_result,
+        Error, duckdb_failure_from_message, result_from_duckdb_appender, result_from_duckdb_extract,
+        result_from_duckdb_prepare, result_from_duckdb_result,
     },
     raw_statement::RawStatement,
     statement::Statement,
@@ -247,6 +248,52 @@ impl InnerConnection {
             appender.add_column(column)?;
         }
         Ok(appender)
+    }
+
+    pub fn query_appender<'a>(
+        &mut self,
+        conn: &'a Connection,
+        query: &str,
+        types: &[LogicalTypeHandle],
+        relation_name: &str,
+        column_names: &[&str],
+    ) -> Result<QueryAppender<'a>> {
+        let runtime_version = unsafe { CStr::from_ptr(ffi::duckdb_library_version()) }.to_string_lossy();
+        if runtime_version != "v1.5.5" {
+            return Err(duckdb_failure_from_message(format!(
+                "query appender compatibility layer requires DuckDB v1.5.5, found {runtime_version}"
+            )));
+        }
+        if types.len() != column_names.len() {
+            return Err(duckdb_failure_from_message(format!(
+                "query appender schema has {} types but {} column names",
+                types.len(),
+                column_names.len()
+            )));
+        }
+
+        let c_query = CString::new(query)?;
+        let c_relation_name = CString::new(relation_name)?;
+        let c_column_names = column_names
+            .iter()
+            .map(|name| CString::new(*name))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut column_name_ptrs = c_column_names.iter().map(|name| name.as_ptr()).collect::<Vec<_>>();
+        let mut type_ptrs = types.iter().map(|logical_type| logical_type.ptr).collect::<Vec<_>>();
+        let mut c_app = ptr::null_mut();
+        let rc = unsafe {
+            ffi::duckdb_appender_create_query(
+                self.con,
+                c_query.as_ptr(),
+                type_ptrs.len() as ffi::idx_t,
+                type_ptrs.as_mut_ptr(),
+                c_relation_name.as_ptr(),
+                column_name_ptrs.as_mut_ptr(),
+                &mut c_app,
+            )
+        };
+        result_from_duckdb_appender(rc, &mut c_app)?;
+        Ok(QueryAppender::new(conn, c_app))
     }
 
     pub fn get_interrupt_handle(&self) -> Arc<InterruptHandle> {

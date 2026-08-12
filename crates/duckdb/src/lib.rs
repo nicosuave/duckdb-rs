@@ -71,7 +71,7 @@ use crate::{cache::StatementCache, inner_connection::InnerConnection, raw_statem
 #[cfg(feature = "r2d2")]
 pub use crate::r2d2::DuckdbConnectionManager;
 pub use crate::{
-    appender::Appender,
+    appender::{Appender, QueryAppender},
     appender_params::{AppenderParams, AppenderParamsFromIter, appender_params_from_iter},
     arrow_batch::{Arrow, ArrowStream},
     cache::CachedStatement,
@@ -622,6 +622,23 @@ impl Connection {
     /// Will return `Err` if `table` does not exist or a column name is invalid.
     pub fn appender_with_columns(&self, table: &str, columns: &[&str]) -> Result<Appender<'_>> {
         self.appender_with_columns_to_db(table, &DatabaseName::Main.to_string(), columns)
+    }
+
+    /// Create an appender that exposes appended rows as a named relation to a
+    /// DuckDB DML query.
+    ///
+    /// The schema describes the input relation. Explicitly flush and check the
+    /// result before committing the enclosing transaction.
+    pub fn query_appender(
+        &self,
+        query: &str,
+        types: &[core::LogicalTypeHandle],
+        relation_name: &str,
+        column_names: &[&str],
+    ) -> Result<QueryAppender<'_>> {
+        self.db
+            .borrow_mut()
+            .query_appender(self, query, types, relation_name, column_names)
     }
 
     /// Create an Appender that only provides values for specific columns, with schema.

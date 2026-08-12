@@ -77,6 +77,40 @@ pub struct Appender<'conn> {
     app: ffi::duckdb_appender,
 }
 
+/// An appender that exposes appended rows as a named relation to a DML query.
+///
+/// This is a compatibility wrapper for the experimental query-appender C API
+/// shipped by DuckDB 1.5.5. Construction rejects other runtime versions until
+/// the API reaches its planned stable boundary.
+pub struct QueryAppender<'conn> {
+    inner: Appender<'conn>,
+}
+
+impl QueryAppender<'_> {
+    /// Flush buffered input and execute the DML query for that input.
+    ///
+    /// DuckDB's C appender API does not expose an affected-row count. Callers
+    /// can count accepted input rows, but DML can affect a different number.
+    #[inline]
+    pub fn flush(&mut self) -> Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<'conn> QueryAppender<'conn> {
+    pub(crate) fn new(conn: &'conn Connection, app: ffi::duckdb_appender) -> Self {
+        Self {
+            inner: Appender::new(conn, app),
+        }
+    }
+}
+
+impl fmt::Debug for QueryAppender<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryAppender").field("inner", &self.inner).finish()
+    }
+}
+
 // SAFETY: every method that touches the appender pointer takes `&mut self`.
 // The only shared access exposed by the public API (the `Debug` impl) reads
 // `Connection`'s immutable `path` field without touching the appender pointer
